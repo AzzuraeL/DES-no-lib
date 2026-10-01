@@ -9,49 +9,17 @@ A peer-to-peer encrypted chat application implemented in Python. Messages are en
 - [Overview](#overview)
 - [How to Run](#how-to-run)
 - [File Structure](#file-structure)
-- [des.py — Detailed Explanation](#despy--detailed-explanation)
-  - [Module Docstring and Imports](#module-docstring-and-imports)
-  - [DES Constant Tables](#des-constant-tables)
-    - [PI — Initial Permutation](#pi--initial-permutation)
-    - [CP_1 — Permuted Choice 1 (Key)](#cp_1--permuted-choice-1-key)
-    - [CP_2 — Permuted Choice 2 (Key)](#cp_2--permuted-choice-2-key)
-    - [E — Expansion Permutation](#e--expansion-permutation)
-    - [S_BOX — Substitution Boxes](#s_box--substitution-boxes)
-    - [P — P-Box Permutation](#p--p-box-permutation)
-    - [PI_1 — Final (Inverse) Permutation](#pi_1--final-inverse-permutation)
-    - [SHIFT — Key Schedule Rotation Counts](#shift--key-schedule-rotation-counts)
-  - [Utility Functions](#utility-functions)
-    - [bytes_to_bit_array()](#bytes_to_bit_arraydata)
-    - [bit_array_to_bytes()](#bit_array_to_bytesbits)
-    - [nsplit()](#nsplitdata-n)
-    - [binvalue()](#binvalueval-bitsize)
-  - [The `des` Class](#the-des-class)
-    - [Constructor: `__init__()`](#constructor-__init__)
-    - [permut()](#permutblock-table)
-    - [expand()](#expandblock-table)
-    - [xor()](#xort1-t2)
-    - [shift()](#shiftg-d-n)
-    - [generatekeys()](#generatekeys)
-    - [substitute()](#substituted_e)
-    - [process_block()](#process_blockblock8-actionencrypt)
-  - [Padding Functions](#padding-functions)
-    - [addPadding()](#addpaddingdata)
-    - [removePadding()](#removepaddingdata)
-  - [CBC Mode Functions](#cbc-mode-functions)
-    - [encrypt()](#encryptplaintext-key8)
-    - [decrypt()](#decryptblob-key8)
-- [chat.py — Detailed Explanation](#chatpy--detailed-explanation)
-  - [Module Docstring](#module-docstring)
-  - [Imports](#imports)
-  - [recv_exact()](#recv_exactsock-n)
-  - [send_msg()](#send_msgsock-text-key)
-  - [receiver_loop()](#receiver_loopsock-key-peer)
-  - [main()](#main)
-  - [Entry Point Guard](#entry-point-guard)
-- [DES Algorithm Walkthrough](#des-algorithm-walkthrough)
-  - [Encryption Flow Diagram](#encryption-flow-diagram)
-  - [Key Schedule Diagram](#key-schedule-diagram)
-  - [CBC Mode Diagram](#cbc-mode-diagram)
+- [des.py — How DES Works (with Diagrams)](#despy--how-des-works-with-diagrams)
+  - [Part 1: The Big Picture — Encryption & Decryption Flow](#part-1-the-big-picture--encryption--decryption-flow)
+  - [Part 2: Key Schedule — How Subkeys Are Generated](#part-2-key-schedule--how-subkeys-are-generated)
+  - [Part 3: Inside a Single Round — The Feistel Function](#part-3-inside-a-single-round--the-feistel-function)
+  - [Part 4: Padding & CBC Mode — Handling Real Messages](#part-4-padding--cbc-mode--handling-real-messages)
+  - [Part 5: Utility Functions](#part-5-utility-functions)
+- [chat.py — The Encrypted Chat Application](#chatpy--the-encrypted-chat-application)
+  - [How Messages Are Sent](#how-messages-are-sent)
+  - [How Messages Are Received](#how-messages-are-received)
+  - [Connection Setup](#connection-setup)
+  - [Main Loop](#main-loop)
 - [Security Notice](#security-notice)
 - [References](#references)
 
@@ -91,7 +59,7 @@ python chat.py connect --host <LISTENER_IP> --port 5000 --key KUNCI123
 ### Key format
 
 - **8 ASCII characters**: e.g. `KUNCI123`, `secret_k`
-- **16 hex digits** (representing 8 bytes): e.g. `4B554E43493132`+ padding to 16 chars
+- **16 hex digits** (representing 8 bytes): e.g. `4B554E434931323`
 
 Both sides **must use the same key** or decryption will fail.
 
@@ -101,461 +69,580 @@ Both sides **must use the same key** or decryption will fail.
 
 ```
 .
-├── README.md    ← This file
-├── des.py       ← DES cipher implementation (referenced from pydes)
-└── chat.py      ← TCP encrypted chat application
+├── README.md           ← This file
+├── des.py              ← DES cipher implementation (referenced from pydes)
+├── chat.py             ← TCP encrypted chat application
+└── images/
+    ├── des_overview.png    ← Diagram: overall DES encrypt/decrypt flow
+    ├── key_schedule.png    ← Diagram: how subkeys K1–K16 are generated
+    └── feistel_round.png   ← Diagram: what happens inside each round
 ```
 
 ---
 
-## des.py — Detailed Explanation
-
-### Module Docstring and Imports
-
-```python
-import os
-```
-
-The only standard library import is `os`, used exclusively for `os.urandom(8)` to generate a cryptographically secure random **Initialization Vector (IV)** for CBC mode. No third-party libraries are needed because the entire DES algorithm is implemented from scratch.
+## des.py — How DES Works (with Diagrams)
 
 ---
 
-### DES Constant Tables
+### Part 1: The Big Picture — Encryption & Decryption Flow
 
-These tables are defined exactly as specified in the **FIPS 46-3** standard (the official DES specification). They are the heart of the DES algorithm and cannot be changed without breaking compatibility with the standard.
+<!-- INSERT IMAGE: images/des_overview.png -->
 
-#### PI — Initial Permutation
+![DES Overview — Encryption and Decryption Flow](images/des_overview.png)
+
+This diagram shows the **complete DES algorithm** from start to finish. Let's walk through it step by step, matching each box in the picture to the actual code.
+
+---
+
+#### Step 1: "Plaintext 64bit" → "Initial Permutation"
+
+The 64-bit (8-byte) plaintext block enters the algorithm. The very first thing DES does is **rearrange (permute) the bits** using a fixed table called **PI** (Initial Permutation).
+
+This doesn't add any security — it was designed for hardware efficiency in the 1970s — but it's part of the DES standard, so we must do it.
+
+**The table in our code:**
 
 ```python
 PI = [58, 50, 42, 34, 26, 18, 10, 2,
-      60, 52, 44, 36, 28, 20, 12, 4, ...]
+      60, 52, 44, 36, 28, 20, 12, 4,
+      ...
+      63, 55, 47, 39, 31, 23, 15, 7]
 ```
 
-- **Size**: 64 entries
-- **Purpose**: Before any Feistel round begins, the 64-bit plaintext block is permuted (rearranged) according to this table.
-- **How it works**: The first bit of the output comes from position 58 of the input, the second bit from position 50, and so on.
-- **Why**: The initial permutation was originally designed for hardware implementation efficiency in the 1970s. It has no cryptographic significance by itself, but is part of the standard and must be applied for interoperability.
+This means: "take bit 58 and put it in position 1, take bit 50 and put it in position 2, ..." and so on for all 64 bits.
 
-#### CP_1 — Permuted Choice 1 (Key)
+**The code that does this** (inside `process_block()`):
 
 ```python
-CP_1 = [57, 49, 41, 33, 25, 17, 9,
-        1, 58, 50, 42, 34, 26, 18, ...]
+block = bytes_to_bit_array(block8)      # convert 8 bytes → list of 64 bits
+block = self.permut(block, PI)           # rearrange bits using the PI table
 ```
 
-- **Size**: 56 entries (selecting 56 bits from a 64-bit key)
-- **Purpose**: The DES key is 64 bits (8 bytes) but only 56 bits are actually used. Every 8th bit is a parity bit that is discarded. CP_1 selects and permutes the 56 effective key bits.
-- **How it works**: Bit 57 of the 64-bit key becomes bit 1 of the 56-bit result, bit 49 becomes bit 2, etc.
-
-#### CP_2 — Permuted Choice 2 (Key)
+The `permut()` method is very simple — it just picks bits according to the table:
 
 ```python
-CP_2 = [14, 17, 11, 24, 1, 5, 3, 28,
-        15, 6, 21, 10, 23, 19, 12, 4, ...]
+def permut(self, block, table):
+    return [block[x - 1] for x in table]    # x-1 because table is 1-indexed
 ```
 
-- **Size**: 48 entries (selecting 48 bits from a 56-bit key)
-- **Purpose**: After the two 28-bit key halves are shifted for each round, they are merged back into 56 bits. CP_2 selects 48 of those 56 bits to form the round subkey Ki.
-- **Why 48 bits**: The round function needs a 48-bit subkey to XOR with the 48-bit expanded R-half.
+---
 
-#### E — Expansion Permutation
+#### Step 2: Split into Left and Right halves
+
+After the initial permutation, the 64-bit block is split into two 32-bit halves: **Left (L)** and **Right (R)**.
 
 ```python
-E = [32, 1, 2, 3, 4, 5,
-     4, 5, 6, 7, 8, 9, ...]
+g, d = nsplit(block, 32)    # g = Left half, d = Right half
 ```
 
-- **Size**: 48 entries (expanding 32 bits to 48 bits)
-- **Purpose**: The 32-bit right half (R) of the data needs to be XORed with the 48-bit subkey, so it must first be expanded to 48 bits. Some bits are duplicated (e.g., bit 4 appears in both position 4 and position 7 of the output).
-- **Cryptographic role**: The duplication introduces diffusion — a change in one input bit affects multiple S-Box inputs.
+In our code, `g` means "gauche" (French for left) and `d` means "droite" (French for right), following the naming from the pydes reference.
 
-#### S_BOX — Substitution Boxes
+---
+
+#### Step 3: "Round 1" through "Round 16" — The 16 Feistel Rounds
+
+This is the **core of DES**. The same operation is repeated 16 times, each time using a different subkey (K1, K2, ..., K16).
+
+As you can see in the diagram:
+- **For encryption**: Round 1 uses K1, Round 2 uses K2, ..., Round 16 uses K16
+- **For decryption**: Round 16 uses K1, Round 15 uses K2, ..., Round 1 uses K16 *(the keys are used in reverse order!)*
+
+This is a beautiful property of the **Feistel structure** — you don't need a separate decryption algorithm. Just reverse the key order.
+
+**The code** (inside `process_block()`):
 
 ```python
-S_BOX = [
-  [[14, 4, 13, 1, ...], [0, 15, 7, 4, ...], [4, 1, 14, 8, ...], [15, 12, 8, 2, ...]],
-  ...  # 8 S-Boxes total
-]
+for i in range(16):                          # 16 rounds
+    d_e = self.expand(d, E)                  # (explained in Part 3)
+    if action == ENCRYPT:
+        tmp = self.xor(self.keys[i], d_e)    # use K1, K2, ..., K16
+    else:
+        tmp = self.xor(self.keys[15 - i], d_e)  # use K16, K15, ..., K1
+    tmp = self.substitute(tmp)               # (explained in Part 3)
+    tmp = self.permut(tmp, P)                # (explained in Part 3)
+    tmp = self.xor(g, tmp)
+    g = d                                    # old Right becomes new Left
+    d = tmp                                  # result becomes new Right
 ```
 
-- **Structure**: 8 S-Boxes, each containing 4 rows × 16 columns.
-- **Input**: 6 bits → **Output**: 4 bits (per S-Box)
-- **How addressing works**:
-  - **Row** (2 bits): formed by the 1st and 6th bit of the 6-bit input (range 0–3)
-  - **Column** (4 bits): formed by the 2nd through 5th bits (range 0–15)
-- **Cryptographic role**: The S-Boxes are the **only non-linear component** of DES. They provide the *confusion* that makes the cipher resistant to linear and algebraic attacks. Without the S-Boxes, DES would be an affine transformation and trivially breakable.
+---
 
-#### P — P-Box Permutation
+#### Step 4: "Final Permutation" → "Ciphertext 64bit"
+
+After all 16 rounds, the Left and Right halves are **swapped** (R goes first, then L) and then the **Final Permutation (PI_1)** is applied. PI_1 is the exact inverse of PI — it undoes the initial permutation.
 
 ```python
-P = [16, 7, 20, 21, 29, 12, 28, 17,
-     1, 15, 23, 26, 5, 18, 31, 10, ...]
+final = self.permut(d + g, PI_1)    # note: d+g means R comes before L (the swap!)
+return bit_array_to_bytes(final)    # convert 64 bits back to 8 bytes
 ```
 
-- **Size**: 32 entries (32-bit → 32-bit)
-- **Purpose**: After the S-Box substitution produces 32 bits (8 × 4), the P permutation rearranges them so that in the next round, each S-Box's output bits are spread across multiple different S-Boxes.
-- **Cryptographic role**: Provides *diffusion* — ensures that each plaintext bit eventually influences every ciphertext bit (the "avalanche effect").
-
-#### PI_1 — Final (Inverse) Permutation
+**The PI_1 table:**
 
 ```python
 PI_1 = [40, 8, 48, 16, 56, 24, 64, 32,
-        39, 7, 47, 15, 55, 23, 63, 31, ...]
+        39, 7, 47, 15, 55, 23, 63, 31,
+        ...
+        33, 1, 41, 9, 49, 17, 57, 25]
 ```
 
-- **Size**: 64 entries
-- **Purpose**: The exact inverse of the initial permutation PI. Applied after all 16 Feistel rounds to produce the final ciphertext block.
-- **Mathematical relationship**: `PI_1[PI[i] - 1] == i + 1` for all i. This means applying PI followed by PI_1 (or vice versa) gives back the original data.
+---
 
-#### SHIFT — Key Schedule Rotation Counts
+#### The Right Side of the Diagram: Decryption
+
+Notice how the right side of the diagram is a **mirror image** of the left side. Decryption does the exact same steps, but:
+- It starts with the **Final Permutation** (which undoes the initial permutation from encryption)
+- The subkeys are used in **reverse order** (K16 first, K1 last)
+- It ends with the **Initial Permutation** (which undoes the final permutation from encryption)
+
+In our code, encryption and decryption use the **same method** (`process_block`), just with a different `action` flag that controls the key order.
+
+---
+
+### Part 2: Key Schedule — How Subkeys Are Generated
+
+<!-- INSERT IMAGE: images/key_schedule.png -->
+
+![Key Schedule — How Subkeys K1-K16 Are Generated](images/key_schedule.png)
+
+The center column of the first diagram showed a "Round key generator" — this second diagram zooms into that box and shows exactly how the 16 subkeys (K1 through K16) are created from your 8-byte key. This entire process happens in the `generatekeys()` method.
+
+---
+
+#### Step 1: "Full key (64 bit)" → "Parity bit cleaning" → "Cipher key (56 bit)"
+
+Your key is 8 bytes = 64 bits, but DES only actually uses **56 of those bits**. Every 8th bit is a "parity bit" that gets thrown away. The **CP_1** table (Permuted Choice 1) does this — it selects 56 bits from the 64-bit key and rearranges them.
+
+```python
+key = bytes_to_bit_array(self.password)   # 64 bits
+key = self.permut(key, CP_1)               # → 56 bits (parity bits dropped)
+```
+
+The **CP_1** table:
+
+```python
+CP_1 = [57, 49, 41, 33, 25, 17, 9,
+        1, 58, 50, 42, 34, 26, 18,
+        ...
+        21, 13, 5, 28, 20, 12, 4]
+```
+
+Notice this table has **56 entries** (not 64) — that's how the 8 parity bits get dropped.
+
+---
+
+#### Step 2: Split into two 28-bit halves
+
+The 56-bit key is split into a **left half (C)** and a **right half (D)**, each 28 bits.
+
+```python
+g, d = nsplit(key, 28)    # g = left 28 bits (C), d = right 28 bits (D)
+```
+
+---
+
+#### Step 3: "Left circular shift" (repeated for each round)
+
+As the diagram shows, for each round, **both halves are shifted left** by a certain number of positions. The bits that "fall off" the left end wrap around to the right end (that's what "circular" means).
+
+The number of positions to shift depends on the round:
 
 ```python
 SHIFT = [1, 1, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 1]
 ```
 
-- **Size**: 16 entries (one per round)
-- **Purpose**: Specifies how many positions to left-circular-shift the two 28-bit key halves before extracting each round's subkey.
-- **Total shifts**: 1+1+2+2+2+2+2+2+1+2+2+2+2+2+2+1 = **28**, meaning after all 16 rounds the key halves return to their original position.
-- **Pattern**: Rounds 1, 2, 9, and 16 shift by 1; all others shift by 2.
+- Rounds 1, 2, 9, 16: shift by **1**
+- All other rounds: shift by **2**
+- Total shifts: 1+1+2+2+2+2+2+2+1+2+2+2+2+2+2+1 = **28** (so after all 16 rounds, the halves return to their original position)
 
----
-
-### Utility Functions
-
-#### `bytes_to_bit_array(data)`
-
-```python
-def bytes_to_bit_array(data):
-    array = []
-    for byte in data:
-        for i in range(7, -1, -1):
-            array.append((byte >> i) & 1)
-    return array
-```
-
-- **Input**: A `bytes` object (e.g., `b"\x41"` = ASCII 'A')
-- **Output**: A list of integers, each 0 or 1 (e.g., `[0,1,0,0,0,0,0,1]`)
-- **How it works**: For each byte, it iterates from the most significant bit (bit 7) down to the least significant bit (bit 0), extracting each bit using right-shift and bitwise AND.
-- **Example**: `bytes_to_bit_array(b"\xCA")` → `[1,1,0,0,1,0,1,0]` (0xCA = 11001010 in binary)
-
-#### `bit_array_to_bytes(bits)`
-
-```python
-def bit_array_to_bytes(bits):
-    result = bytearray()
-    for i in range(0, len(bits), 8):
-        val = 0
-        for bit in bits[i:i+8]:
-            val = (val << 1) | bit
-        result.append(val)
-    return bytes(result)
-```
-
-- **Input**: A list of bits (0/1 integers), length must be a multiple of 8
-- **Output**: A `bytes` object
-- **How it works**: Groups bits into chunks of 8, reconstructs each byte by left-shifting and ORing each successive bit.
-- **This is the inverse of `bytes_to_bit_array()`**.
-
-#### `nsplit(data, n)`
-
-```python
-def nsplit(data, n):
-    return [data[k:k+n] for k in range(0, len(data), n)]
-```
-
-- **Input**: Any list/sequence `data` and a chunk size `n`
-- **Output**: A list of sublists, each of length `n` (the last may be shorter)
-- **Used by**: Key schedule (splitting 56-bit key into two 28-bit halves), Feistel rounds (splitting 64-bit block into two 32-bit halves), S-Box processing (splitting 48 bits into eight 6-bit groups)
-
-#### `binvalue(val, bitsize)`
-
-```python
-def binvalue(val, bitsize):
-    binval = bin(val)[2:]
-    if len(binval) > bitsize:
-        raise ValueError("binary value larger than the expected size")
-    return binval.zfill(bitsize)
-```
-
-- **Input**: An integer `val` and a desired `bitsize`
-- **Output**: A zero-padded binary string of exactly `bitsize` characters
-- **Example**: `binvalue(5, 4)` → `"0101"`
-- **Used by**: The `substitute()` method to convert an S-Box output value (0–15) into a 4-bit string.
-
----
-
-### The `des` Class
-
-The `des` class encapsulates the DES algorithm state (key and subkeys) and provides methods for each step of the cipher.
-
-#### Constructor: `__init__()`
-
-```python
-def __init__(self):
-    self.password = None
-    self.keys = []
-```
-
-- `self.password`: Stores the 8-byte key (as `bytes`)
-- `self.keys`: Will hold the 16 round subkeys (each a list of 48 bits) after `generatekeys()` is called
-
-#### `permut(block, table)`
-
-```python
-def permut(self, block, table):
-    return [block[x - 1] for x in table]
-```
-
-- **Purpose**: Generic bit permutation. Rearranges the bits of `block` according to `table`.
-- **The `-1`**: DES tables use 1-based indexing, but Python lists are 0-based, hence `x - 1`.
-- **Used for**: PI (initial permutation), PI_1 (final permutation), CP_1, CP_2, and P.
-
-#### `expand(block, table)`
-
-```python
-def expand(self, block, table):
-    return [block[x - 1] for x in table]
-```
-
-- **Identical to `permut()`** in implementation. It exists as a separate method for code clarity — it signals that the operation is an *expansion* (output is larger than input), not a simple rearrangement.
-- **Used for**: The E table (32-bit → 48-bit expansion).
-
-#### `xor(t1, t2)`
-
-```python
-def xor(self, t1, t2):
-    return [x ^ y for x, y in zip(t1, t2)]
-```
-
-- **Purpose**: Element-wise XOR of two bit lists of equal length.
-- **Used in**: XORing the expanded R-half with the round subkey, and XORing the result with L.
-
-#### `shift(g, d, n)`
+**The code:**
 
 ```python
 def shift(self, g, d, n):
     return g[n:] + g[:n], d[n:] + d[:n]
 ```
 
-- **Purpose**: Left circular shift of both 28-bit key halves by `n` positions.
-- **How it works**: `g[n:]` gives everything after the first `n` elements; `g[:n]` gives the first `n` elements that "wrap around" to the end.
-- **Example**: `shift([1,2,3,4,5], [6,7,8,9,0], 2)` → `([3,4,5,1,2], [8,9,0,6,7])`
+For example, if `g = [A,B,C,D,E]` and `n = 2`, then `g[2:] + g[:2]` = `[C,D,E,A,B]` — the first 2 elements moved to the end.
 
-#### `generatekeys()`
+---
+
+#### Step 4: "Compression" → Subkey Ki (48 bit)
+
+After shifting, the two halves are merged back into 56 bits, and then **CP_2** (Permuted Choice 2) selects **48 bits** out of those 56 to form the round subkey.
+
+Why 48 bits? Because in each Feistel round, the Right half is expanded from 32 to 48 bits (we'll see this in Part 3), and the subkey needs to be the same size for XOR.
+
+```python
+tmp = g + d                                  # merge back to 56 bits
+self.keys.append(self.permut(tmp, CP_2))     # select 48 bits → subkey Ki
+```
+
+**The CP_2 table** (48 entries selecting from 56 bits):
+
+```python
+CP_2 = [14, 17, 11, 24, 1, 5, 3, 28,
+        15, 6, 21, 10, 23, 19, 12, 4,
+        ...
+        34, 53, 46, 42, 50, 36, 29, 32]
+```
+
+---
+
+#### The complete `generatekeys()` method:
 
 ```python
 def generatekeys(self):
     self.keys = []
     key = bytes_to_bit_array(self.password)
-    key = self.permut(key, CP_1)
-    g, d = nsplit(key, 28)
-    for i in range(16):
-        g, d = self.shift(g, d, SHIFT[i])
-        tmp = g + d
-        self.keys.append(self.permut(tmp, CP_2))
+    key = self.permut(key, CP_1)            # 64 → 56 bits (drop parity)
+    g, d = nsplit(key, 28)                  # split into two 28-bit halves
+    for i in range(16):                     # for each round:
+        g, d = self.shift(g, d, SHIFT[i])   #   shift both halves
+        tmp = g + d                         #   merge (56 bits)
+        self.keys.append(self.permut(tmp, CP_2))  # compress → 48-bit subkey
 ```
 
-- **Step-by-step**:
-  1. Convert the 8-byte (64-bit) key to a bit array
-  2. Apply CP_1 to select and permute the 56 effective key bits
-  3. Split into two 28-bit halves: C (g) and D (d)
-  4. For each of the 16 rounds:
-     - Left-circular-shift both halves by the amount specified in SHIFT
-     - Concatenate the shifted halves (56 bits)
-     - Apply CP_2 to select 48 bits → this is subkey Ki
-  5. Store all 16 subkeys in `self.keys`
-
-#### `substitute(d_e)`
-
-```python
-def substitute(self, d_e):
-    subblocks = nsplit(d_e, 6)
-    result = []
-    for i in range(len(subblocks)):
-        block = subblocks[i]
-        row = (block[0] << 1) | block[5]
-        col = (block[1] << 3) | (block[2] << 2) | (block[3] << 1) | block[4]
-        val = S_BOX[i][row][col]
-        result += [int(x) for x in binvalue(val, 4)]
-    return result
-```
-
-- **Input**: A 48-bit list (after XOR with round subkey)
-- **Output**: A 32-bit list (after S-Box substitution)
-- **Step-by-step**:
-  1. Split the 48 bits into 8 groups of 6 bits
-  2. For each 6-bit group and corresponding S-Box:
-     - **Row**: Combine bit 0 and bit 5 → a 2-bit number (0–3)
-     - **Column**: Combine bits 1–4 → a 4-bit number (0–15)
-     - **Lookup**: Get the 4-bit value from `S_BOX[i][row][col]`
-     - **Convert**: Turn the value into 4 bits and append to result
-  3. The result is 8 × 4 = 32 bits
-
-#### `process_block(block8, action=ENCRYPT)`
-
-```python
-def process_block(self, block8, action=ENCRYPT):
-    block = bytes_to_bit_array(block8)
-    block = self.permut(block, PI)
-    g, d = nsplit(block, 32)
-    for i in range(16):
-        d_e = self.expand(d, E)
-        if action == ENCRYPT:
-            tmp = self.xor(self.keys[i], d_e)
-        else:
-            tmp = self.xor(self.keys[15 - i], d_e)
-        tmp = self.substitute(tmp)
-        tmp = self.permut(tmp, P)
-        tmp = self.xor(g, tmp)
-        g = d
-        d = tmp
-    final = self.permut(d + g, PI_1)
-    return bit_array_to_bytes(final)
-```
-
-This is the **core DES algorithm** for a single 64-bit block:
-
-1. **Convert** the 8-byte block to 64 bits
-2. **Initial permutation** (PI)
-3. **Split** into 32-bit Left (g) and Right (d) halves
-4. **16 Feistel rounds**:
-   - **Expand** R (d) from 32 bits to 48 bits
-   - **XOR** with subkey Ki (for encryption use keys in order; for decryption use keys in reverse)
-   - **Substitute** through 8 S-Boxes (48 bits → 32 bits)
-   - **Permute** with P (32 bits → 32 bits)
-   - **XOR** with L (g)
-   - **Swap**: old R becomes new L; result becomes new R
-5. **Combine** R + L (note: reversed! This is the "final swap" of the Feistel structure)
-6. **Final permutation** (PI_1)
-7. **Convert** back to bytes
-
-**Why decryption works with reversed keys**: The Feistel structure has the elegant property that using the same algorithm with subkeys in reverse order perfectly undoes the encryption. No separate decryption algorithm is needed.
+After this runs, `self.keys` contains 16 subkeys: `[K1, K2, K3, ..., K16]`.
 
 ---
 
-### Padding Functions
+### Part 3: Inside a Single Round — The Feistel Function
 
-#### `addPadding(data)`
+<!-- INSERT IMAGE: images/feistel_round.png -->
+
+![Single Feistel Round and the DES Function Detail](images/feistel_round.png)
+
+This diagram shows two things:
+1. **Top half**: What happens in one round (how Left and Right halves interact)
+2. **Bottom half**: What's inside the "DES function" box (the F function)
+
+---
+
+#### Top Half: One Feistel Round
+
+Looking at the top of the diagram:
+
+1. The 64-bit input enters as **Left (32 bit)** and **Right (32 bit)**
+2. The Right half goes into the **"DES function"** (F function) along with the round's subkey **Ki**
+3. The output of the DES function is **XORed with the Left half**
+4. Then the two halves **swap** (the X-shaped crossing in the diagram): old Right becomes new Left, and the XOR result becomes new Right
+
+**The code for this** (inside `process_block()`):
+
+```python
+for i in range(16):
+    # Right half 'd' goes into the F function (expanded, XORed with key, etc.)
+    d_e = self.expand(d, E)              # part of the F function
+    tmp = self.xor(self.keys[i], d_e)    # part of the F function
+    tmp = self.substitute(tmp)           # part of the F function
+    tmp = self.permut(tmp, P)            # part of the F function
+
+    tmp = self.xor(g, tmp)              # XOR the F function output with Left half
+    g = d                                # swap: old Right → new Left
+    d = tmp                              # swap: XOR result → new Right
+```
+
+---
+
+#### Bottom Half: Inside the DES Function (F Function)
+
+The bottom of the diagram zooms into the "DES function" box. It has 4 steps:
+
+---
+
+##### Step A: "Expansion box" — Right (32 bit) → text (48 bit)
+
+The 32-bit Right half needs to be XORed with the 48-bit subkey, so it must first be **expanded** from 32 to 48 bits. Some bits get duplicated.
+
+```python
+d_e = self.expand(d, E)    # 32 bits → 48 bits
+```
+
+The **E (Expansion)** table:
+
+```python
+E = [32, 1, 2, 3, 4, 5,
+     4, 5, 6, 7, 8, 9,     # notice bit 4 and 5 appear twice
+     8, 9, 10, 11, 12, 13,  # bit 8 and 9 appear twice
+     ...
+     28, 29, 30, 31, 32, 1]
+```
+
+The expansion takes each group of 4 adjacent bits and adds 1 bit from the neighboring group on each side, creating overlapping 6-bit groups.
+
+---
+
+##### Step B: "XOR" — text (48 bit) ⊕ Ki (48 bit) → text (48 bit)
+
+The expanded 48-bit data is XORed with the 48-bit round subkey. This is where the **key actually mixes into the data**.
+
+```python
+tmp = self.xor(self.keys[i], d_e)    # 48 ⊕ 48 = 48 bits
+```
+
+---
+
+##### Step C: "Eight S-Boxes" — text (48 bit) → text (32 bit)
+
+This is the **most important step** in all of DES. The 48-bit result is split into **8 groups of 6 bits**, and each group is fed into a different **S-Box** (Substitution Box). Each S-Box takes 6 bits in and outputs 4 bits, so 8 × 4 = 32 bits total.
+
+The S-Boxes are the **only non-linear part** of DES. Without them, DES would just be shuffling and XORing bits — which can be broken easily with math. The S-Boxes make the relationship between input and output complex and hard to reverse.
+
+**How each S-Box lookup works:**
+
+Each 6-bit group like `[b0, b1, b2, b3, b4, b5]`:
+- **Row** = first bit + last bit combined → 2-bit number (0–3)
+- **Column** = middle 4 bits combined → 4-bit number (0–15)
+- Look up the value in `S_BOX[i][row][column]`
+
+```python
+def substitute(self, d_e):
+    subblocks = nsplit(d_e, 6)           # split 48 bits into 8 groups of 6
+    result = []
+    for i in range(len(subblocks)):
+        block = subblocks[i]
+        row = (block[0] << 1) | block[5]                                    # first + last bit
+        col = (block[1] << 3) | (block[2] << 2) | (block[3] << 1) | block[4]  # middle 4 bits
+        val = S_BOX[i][row][col]          # lookup: 6 bits → 4-bit value
+        result += [int(x) for x in binvalue(val, 4)]   # convert to 4 bits
+    return result
+```
+
+**Example**: If a 6-bit group is `[1, 0, 1, 1, 0, 1]`:
+- Row = first bit `1` and last bit `1` → binary `11` → row **3**
+- Column = middle bits `0, 1, 1, 0` → binary `0110` → column **6**
+- Look up `S_BOX[i][3][6]` → get a value like `13`
+- Convert `13` to 4 bits: `1101`
+
+---
+
+##### Step D: "Permutation" — text (32 bit) → Output text (32 bit)
+
+After the S-Box substitution, the 32-bit result is **rearranged** one more time using the **P** table. This ensures that in the next round, each S-Box's output bits are spread across multiple different S-Boxes, creating the "avalanche effect" (changing 1 input bit eventually changes ~half of all output bits).
+
+```python
+tmp = self.permut(tmp, P)
+```
+
+The **P** table:
+
+```python
+P = [16, 7, 20, 21, 29, 12, 28, 17,
+     1, 15, 23, 26, 5, 18, 31, 10,
+     2, 8, 24, 14, 32, 27, 3, 9,
+     19, 13, 30, 6, 22, 11, 4, 25]
+```
+
+---
+
+### Part 4: Padding & CBC Mode — Handling Real Messages
+
+The three diagrams above explain how DES encrypts **a single 8-byte block**. But chat messages can be any length. We need two more things:
+
+#### PKCS5 Padding — Making messages fit into 8-byte blocks
+
+DES can only encrypt exactly 8 bytes at a time. If your message is `"hello"` (5 bytes), we need to add 3 extra bytes to make it 8. PKCS5 padding adds bytes whose **value equals the number of bytes added**:
+
+| Message | Length | Padding needed | Padded result |
+|---------|--------|----------------|---------------|
+| `hello` | 5 | 3 bytes | `hello\x03\x03\x03` |
+| `hi` | 2 | 6 bytes | `hi\x06\x06\x06\x06\x06\x06` |
+| `12345678` | 8 | 8 bytes (full block!) | `12345678\x08\x08\x08\x08\x08\x08\x08\x08` |
+
+The last case is important: even if the message is already 8 bytes, we **still add a full block of padding**. This way, when removing padding, we can always reliably know how many bytes to strip.
 
 ```python
 def addPadding(data):
     pad_len = 8 - (len(data) % 8)
     return data + bytes([pad_len]) * pad_len
-```
 
-- **Standard**: PKCS5 / PKCS7
-- **How it works**: If the data length modulo 8 is `r`, then `8 - r` bytes are appended, each with the value `8 - r`.
-- **Example**: `b"Hello"` (5 bytes) → needs 3 bytes of padding → `b"Hello\x03\x03\x03"`
-- **Edge case**: If data is already a multiple of 8, a full block of `\x08\x08\x08\x08\x08\x08\x08\x08` is appended. This ensures that padding is always unambiguously removable.
-
-#### `removePadding(data)`
-
-```python
 def removePadding(data):
-    pad_len = data[-1]
+    pad_len = data[-1]                # last byte tells us the padding length
     if pad_len < 1 or pad_len > 8 or data[-pad_len:] != bytes([pad_len]) * pad_len:
         raise ValueError("Padding tidak valid (key salah / data rusak)")
-    return data[:-pad_len]
+    return data[:-pad_len]            # strip the padding bytes
 ```
-
-- **How it works**: Reads the last byte to determine the padding length, validates that all padding bytes have the correct value, then strips them.
-- **Error handling**: If the padding is invalid (e.g., because the wrong key was used), a `ValueError` is raised with the message "Padding tidak valid (key salah / data rusak)" ("Invalid padding (wrong key / corrupted data)").
 
 ---
 
-### CBC Mode Functions
+#### CBC Mode — Making identical messages look different
 
-DES-ECB (Electronic Codebook) encrypts each block independently, which is insecure because identical plaintext blocks produce identical ciphertext blocks. **CBC (Cipher Block Chaining)** fixes this by XORing each plaintext block with the previous ciphertext block before encryption.
+If we just encrypted each 8-byte block independently (called "ECB mode"), the same message with the same key would always produce the same ciphertext. An attacker could notice patterns.
 
-#### `encrypt(plaintext, key8)`
+**CBC (Cipher Block Chaining)** fixes this by **XORing each plaintext block with the previous ciphertext block** before encrypting. The first block is XORed with a random **IV (Initialization Vector)** that is generated fresh each time.
+
+**Encryption:**
+```
+  IV (random) ──┐
+                ▼
+  Block 1  ──► XOR ──► DES Encrypt ──► Cipherblock 1 ──┐
+                                                         │
+               ┌─────────────────────────────────────────┘
+               ▼
+  Block 2  ──► XOR ──► DES Encrypt ──► Cipherblock 2 ──┐
+                                                         │
+               ┌─────────────────────────────────────────┘
+               ▼
+  Block 3  ──► XOR ──► DES Encrypt ──► Cipherblock 3
+
+  Output sent over network: IV + Cipherblock1 + Cipherblock2 + Cipherblock3
+```
+
+**The code:**
 
 ```python
 def encrypt(plaintext: bytes, key8: bytes) -> bytes:
     d = des()
     d.password = key8
     d.generatekeys()
-    iv = os.urandom(8)
+
+    iv = os.urandom(8)                     # random 8-byte IV
     prev = iv
     out = b""
-    data = addPadding(plaintext)
+    data = addPadding(plaintext)           # pad to multiple of 8
     for i in range(0, len(data), 8):
+        # XOR plaintext block with previous ciphertext (or IV for first block)
         blk = bytes(a ^ b for a, b in zip(data[i:i+8], prev))
-        prev = d.process_block(blk, ENCRYPT)
+        prev = d.process_block(blk, ENCRYPT)   # encrypt the XORed block
         out += prev
-    return iv + out
+    return iv + out                        # prepend IV so receiver can decrypt
 ```
 
-- **Step-by-step**:
-  1. Create a `des` instance and generate subkeys
-  2. Generate a random 8-byte IV using `os.urandom()`
-  3. Pad the plaintext with PKCS5
-  4. For each 8-byte block:
-     - XOR the plaintext block with the previous ciphertext block (or IV for the first block)
-     - Encrypt the XORed block with DES
-     - The result becomes the `prev` for the next block
-  5. Return `IV || ciphertext` (the IV is prepended so the decryptor knows it)
-
-#### `decrypt(blob, key8)`
+**Decryption** (reverse process):
 
 ```python
 def decrypt(blob: bytes, key8: bytes) -> bytes:
     d = des()
     d.password = key8
     d.generatekeys()
-    iv, ct = blob[:8], blob[8:]
+
+    iv, ct = blob[:8], blob[8:]            # extract IV and ciphertext
     if len(ct) == 0 or len(ct) % 8:
         raise ValueError("Panjang ciphertext tidak valid")
     prev = iv
     out = b""
     for i in range(0, len(ct), 8):
         blk = ct[i:i+8]
-        decrypted = d.process_block(blk, DECRYPT)
-        out += bytes(a ^ b for a, b in zip(decrypted, prev))
+        decrypted = d.process_block(blk, DECRYPT)  # decrypt the block
+        out += bytes(a ^ b for a, b in zip(decrypted, prev))  # XOR with prev
         prev = blk
-    return removePadding(out)
+    return removePadding(out)              # strip padding
 ```
-
-- **Step-by-step**:
-  1. Extract the first 8 bytes as the IV; the rest is the ciphertext
-  2. Validate that the ciphertext length is a non-zero multiple of 8
-  3. For each 8-byte ciphertext block:
-     - Decrypt the block with DES
-     - XOR the result with the previous ciphertext block (or IV for the first)
-     - This recovers the original plaintext block
-  4. Remove PKCS5 padding from the reassembled plaintext
 
 ---
 
-## chat.py — Detailed Explanation
+### Part 5: Utility Functions
 
-### Module Docstring
+These are helper functions that convert between different data formats.
 
-```python
-"""
-(receiver/listener):  python chat.py listen --port 5000 --key KUNCI123
-(sender/connector):   python chat.py connect --host <IP_A> --port 5000 --key KUNCI123
-"""
-```
+#### `bytes_to_bit_array(data)` — Bytes → Bits
 
-Quick-reference usage examples right at the top of the file.
-
-### Imports
+Converts a `bytes` object into a list of 0s and 1s. DES works on individual bits, but Python naturally works with bytes, so we need this conversion.
 
 ```python
-import argparse, socket, struct, sys, threading
-import des
+def bytes_to_bit_array(data):
+    array = []
+    for byte in data:
+        for i in range(7, -1, -1):          # from most significant to least significant
+            array.append((byte >> i) & 1)    # extract each bit
+    return array
 ```
 
-| Module | Purpose |
-|--------|---------|
-| `argparse` | Parses command-line arguments (`mode`, `--host`, `--port`, `--key`) |
-| `socket` | TCP networking (creating servers, connecting to peers) |
-| `struct` | Packing/unpacking binary data (4-byte message length headers) |
-| `sys` | `sys.exit()` for fatal errors |
-| `threading` | Running the message receiver in a background thread |
-| `des` | Our custom DES module for encryption/decryption |
+**Example:** `b"\xCA"` (hex CA = binary 11001010) → `[1, 1, 0, 0, 1, 0, 1, 0]`
 
-### `recv_exact(sock, n)`
+#### `bit_array_to_bytes(bits)` — Bits → Bytes
+
+The reverse: takes a list of 0s and 1s and packs them back into bytes.
+
+```python
+def bit_array_to_bytes(bits):
+    result = bytearray()
+    for i in range(0, len(bits), 8):        # process 8 bits at a time
+        val = 0
+        for bit in bits[i:i+8]:
+            val = (val << 1) | bit           # shift left and add next bit
+        result.append(val)
+    return bytes(result)
+```
+
+#### `nsplit(data, n)` — Split a list into chunks
+
+```python
+def nsplit(data, n):
+    return [data[k:k+n] for k in range(0, len(data), n)]
+```
+
+Used to split 64-bit blocks into two 32-bit halves, 56-bit keys into two 28-bit halves, 48-bit data into eight 6-bit groups for S-Boxes, etc.
+
+#### `binvalue(val, bitsize)` — Integer → binary string
+
+```python
+def binvalue(val, bitsize):
+    binval = bin(val)[2:]
+    return binval.zfill(bitsize)    # pad with leading zeros
+```
+
+Converts a number to its binary string representation with a fixed width. Used to convert S-Box output values (0–15) into 4-bit strings.
+
+---
+
+## chat.py — The Encrypted Chat Application
+
+`chat.py` is the networking layer that uses `des.py` to send and receive encrypted messages over TCP between two different devices.
+
+### How Messages Are Sent
+
+```python
+def send_msg(sock, text, key):
+    blob = des.encrypt(text.encode("utf-8"), key)
+    print(f"   [SEND] plaintext : {text}")
+    print(f"   [SEND] ciphertext: {blob[8:].hex().upper()} (IV={blob[:8].hex().upper()})")
+    sock.sendall(struct.pack(">I", len(blob)) + blob)
+```
+
+When you type a message and press Enter:
+
+1. The text string is encoded to UTF-8 bytes
+2. `des.encrypt()` encrypts it using DES-CBC → produces `IV + ciphertext`
+3. The plaintext and ciphertext (in hex) are printed so you can see both
+4. The message is sent over TCP with a **4-byte length header** followed by the encrypted blob
+
+**Wire format:**
+
+```
+[4 bytes: length of blob] [8 bytes: IV] [N bytes: ciphertext]
+```
+
+The length header tells the receiver exactly how many bytes to read.
+
+---
+
+### How Messages Are Received
+
+```python
+def receiver_loop(sock, key, peer):
+    try:
+        while True:
+            (n,) = struct.unpack(">I", recv_exact(sock, 4))   # read length
+            blob = recv_exact(sock, n)                         # read encrypted data
+            print(f"\n   [RECV] ciphertext: {blob[8:].hex().upper()} (IV={blob[:8].hex().upper()})")
+            try:
+                print(f"   [RECV] plaintext : {des.decrypt(blob, key).decode('utf-8')}   (dari {peer})")
+            except Exception as e:
+                print(f"   [RECV] gagal dekripsi: {e}")
+            print("> ", end="", flush=True)
+    except (ConnectionError, OSError):
+        print("\n[!] Lawan bicara terputus.")
+```
+
+This runs in a **background thread** so it can receive messages while you're typing. For each incoming message:
+
+1. Read the 4-byte length header → know how many bytes to expect
+2. Read exactly that many bytes (the encrypted blob)
+3. Display the ciphertext in hex
+4. Decrypt with `des.decrypt()` and display the plaintext
+5. If decryption fails (wrong key), print "gagal dekripsi" (decryption failed)
+
+The `recv_exact()` helper ensures we read exactly `n` bytes, since TCP may deliver data in chunks:
 
 ```python
 def recv_exact(sock, n):
@@ -568,271 +655,74 @@ def recv_exact(sock, n):
     return buf
 ```
 
-- **Purpose**: Reliably receive exactly `n` bytes from a TCP socket.
-- **Why it's needed**: TCP is a *stream* protocol. A single `sock.recv(n)` may return fewer than `n` bytes (e.g., due to network fragmentation or OS buffering). This function loops until all `n` bytes have been collected.
-- **Error handling**: If `sock.recv()` returns an empty bytes object, the connection has been closed by the peer, so a `ConnectionError` is raised.
+---
 
-### `send_msg(sock, text, key)`
-
-```python
-def send_msg(sock, text, key):
-    blob = des.encrypt(text.encode("utf-8"), key)
-    print(f"   [SEND] plaintext : {text}")
-    print(f"   [SEND] ciphertext: {blob[8:].hex().upper()} (IV={blob[:8].hex().upper()})")
-    sock.sendall(struct.pack(">I", len(blob)) + blob)
-```
-
-- **Step-by-step**:
-  1. Encode the text string as UTF-8 bytes
-  2. Encrypt using DES-CBC (returns `IV || ciphertext`)
-  3. Print debug info showing the plaintext and the ciphertext (hex) with its IV
-  4. Send over TCP: first a **4-byte big-endian unsigned integer** containing the blob length, then the blob itself
-
-- **Wire format**: `[4 bytes: length][8 bytes: IV][N bytes: ciphertext]`
-- **`struct.pack(">I", len(blob))`**: The `>` means big-endian byte order; `I` means unsigned 32-bit integer. This gives us a length header so the receiver knows exactly how many bytes to read.
-
-### `receiver_loop(sock, key, peer)`
-
-```python
-def receiver_loop(sock, key, peer):
-    try:
-        while True:
-            (n,) = struct.unpack(">I", recv_exact(sock, 4))
-            blob = recv_exact(sock, n)
-            print(f"\n   [RECV] ciphertext: {blob[8:].hex().upper()} (IV={blob[:8].hex().upper()})")
-            try:
-                print(f"   [RECV] plaintext : {des.decrypt(blob, key).decode('utf-8')}   (dari {peer})")
-            except Exception as e:
-                print(f"   [RECV] gagal dekripsi: {e}")
-            print("> ", end="", flush=True)
-    except (ConnectionError, OSError):
-        print("\n[!] Lawan bicara terputus.")
-        try: sock.close()
-        except OSError: pass
-        import os; os._exit(0)
-```
-
-- **Runs in a background daemon thread** so it can receive messages while the main thread waits for user input.
-- **Step-by-step**:
-  1. **Read length header**: Read 4 bytes, unpack as big-endian uint32 → `n`
-  2. **Read encrypted blob**: Read exactly `n` bytes
-  3. **Display ciphertext**: Show the hex representation of the ciphertext and IV
-  4. **Decrypt and display**: Attempt to decrypt with DES-CBC and print the plaintext
-  5. **Re-display prompt**: Print `"> "` to restore the input prompt
-  6. **Loop forever** until the connection drops
-
-- **Error handling**:
-  - Decryption failure (wrong key or corrupted data) is caught and printed as "gagal dekripsi" ("decryption failed")
-  - Connection loss triggers a clean shutdown via `os._exit(0)` (forceful exit to immediately terminate all threads)
-
-### `main()`
+### Connection Setup
 
 ```python
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", choices=["listen", "connect"])
-    ap.add_argument("--host", default="0.0.0.0", help="IP tujuan (connect) / bind (listen)")
+    ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=5000)
-    ap.add_argument("--key", required=True, help="Key DES: 8 karakter ASCII, atau 16 digit hex")
+    ap.add_argument("--key", required=True)
     a = ap.parse_args()
 ```
 
-**Argument parsing**:
+The program accepts command-line arguments:
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `mode` | Yes | Either `listen` (act as server) or `connect` (act as client) |
-| `--host` | No (default `0.0.0.0`) | IP to bind to (listen) or connect to (connect) |
-| `--port` | No (default `5000`) | TCP port number |
-| `--key` | Yes | The DES key (8 ASCII chars or 16 hex digits) |
+| `mode` | Yes | `listen` (act as server) or `connect` (act as client) |
+| `--host` | No | IP to bind to (listen) or connect to (connect). Default: `0.0.0.0` |
+| `--port` | No | TCP port. Default: `5000` |
+| `--key` | Yes | DES key — 8 ASCII chars or 16 hex digits |
+
+**Key parsing:** If the key is 16 hex characters, it's treated as hex-encoded bytes. Otherwise, it's treated as ASCII.
 
 ```python
-    key = bytes.fromhex(a.key) if len(a.key) == 16 and all(c in "0123456789abcdefABCDEF" for c in a.key) else a.key.encode()
-    if len(key) != 8:
-        sys.exit("Key harus 8 byte (8 karakter ASCII atau 16 hex).")
+key = bytes.fromhex(a.key) if len(a.key) == 16 and all(c in "0123456789abcdefABCDEF" for c in a.key) else a.key.encode()
+if len(key) != 8:
+    sys.exit("Key harus 8 byte (8 karakter ASCII atau 16 hex).")
 ```
 
-**Key parsing logic**:
-- If the key string is exactly 16 characters and all are valid hexadecimal digits → treat it as a hex-encoded 8-byte key (`bytes.fromhex()`)
-- Otherwise → treat it as an ASCII string and encode to bytes (`a.key.encode()`)
-- If the result is not exactly 8 bytes, exit with an error
+**Listen mode** (server):
 
 ```python
-    if a.mode == "listen":
-        srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.bind((a.host, a.port)); srv.listen(1)
-        print(f"[*] Menunggu koneksi di {a.host}:{a.port} ...")
-        sock, addr = srv.accept()
-    else:
-        sock = socket.create_connection((a.host, a.port)); addr = (a.host, a.port)
+srv = socket.socket()
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # allow quick restart
+srv.bind((a.host, a.port))
+srv.listen(1)
+print(f"[*] Menunggu koneksi di {a.host}:{a.port} ...")
+sock, addr = srv.accept()    # blocks until someone connects
 ```
 
-**Connection setup**:
-
-- **Listen mode**:
-  1. Create a TCP socket
-  2. Set `SO_REUSEADDR` to allow quick restart without "Address already in use" errors
-  3. Bind to the specified host and port
-  4. Listen for one incoming connection
-  5. `accept()` blocks until a peer connects, then returns the connection socket and peer address
-
-- **Connect mode**:
-  1. `socket.create_connection()` handles DNS resolution and establishes a TCP connection to the specified host and port
+**Connect mode** (client):
 
 ```python
-    peer = f"{addr[0]}:{addr[1]}"
-    print(f"[+] Tersambung dengan {peer}. Ketik pesan lalu Enter.")
-    threading.Thread(target=receiver_loop, args=(sock, key, peer), daemon=True).start()
+sock = socket.create_connection((a.host, a.port))
 ```
-
-- Format the peer's address as `IP:port`
-- Start the `receiver_loop` in a **daemon thread** (daemon threads are automatically killed when the main thread exits)
-
-```python
-    try:
-        while True:
-            line = input("> ")
-            if line.strip().lower() == "exit": break
-            if line: send_msg(sock, line, key)
-    except (EOFError, KeyboardInterrupt):
-        pass
-    sock.close()
-```
-
-**Main input loop**:
-- Prompts with `"> "` and waits for user input
-- Typing `exit` cleanly disconnects
-- Any non-empty line is encrypted and sent
-- `Ctrl+C` or `Ctrl+D` also exits gracefully
-- The socket is closed on exit
-
-### Entry Point Guard
-
-```python
-if __name__ == "__main__":
-    main()
-```
-
-Standard Python idiom: only run `main()` when the script is executed directly, not when imported as a module.
 
 ---
 
-## DES Algorithm Walkthrough
+### Main Loop
 
-### Encryption Flow Diagram
-
-```
-                        64-bit Plaintext Block
-                               │
-                    ┌──────────▼──────────┐
-                    │  Initial Permutation │  (PI table)
-                    │      (64 → 64)       │
-                    └──────────┬──────────┘
-                               │
-                    ┌──────────▼──────────┐
-                    │   Split into L₀, R₀  │  (32 bits each)
-                    └──────────┬──────────┘
-                               │
-              ┌────────────────▼────────────────┐
-              │         16 Feistel Rounds         │
-              │                                   │
-              │  For each round i (0..15):         │
-              │                                   │
-              │    Expand Rᵢ   (32 → 48 bits)     │
-              │        │                          │
-              │    XOR with Kᵢ  (48 ⊕ 48)        │
-              │        │                          │
-              │    S-Box Subst. (48 → 32 bits)    │
-              │        │                          │
-              │    P Permutation (32 → 32)        │
-              │        │                          │
-              │    XOR with Lᵢ  (32 ⊕ 32)        │
-              │        │                          │
-              │    Lᵢ₊₁ = Rᵢ                      │
-              │    Rᵢ₊₁ = result                   │
-              │                                   │
-              └────────────────┬────────────────┘
-                               │
-                    ┌──────────▼──────────┐
-                    │  Combine R₁₆ + L₁₆   │  (note the swap!)
-                    └──────────┬──────────┘
-                               │
-                    ┌──────────▼──────────┐
-                    │  Final Permutation   │  (PI_1 table)
-                    │     (64 → 64)        │
-                    └──────────┬──────────┘
-                               │
-                        64-bit Ciphertext Block
+```python
+threading.Thread(target=receiver_loop, args=(sock, key, peer), daemon=True).start()
+try:
+    while True:
+        line = input("> ")
+        if line.strip().lower() == "exit": break
+        if line: send_msg(sock, line, key)
+except (EOFError, KeyboardInterrupt):
+    pass
+sock.close()
 ```
 
-### Key Schedule Diagram
-
-```
-                         64-bit Key
-                             │
-                  ┌──────────▼──────────┐
-                  │  Permuted Choice 1   │  (CP_1: 64 → 56 bits)
-                  │  (drop parity bits)  │
-                  └──────────┬──────────┘
-                             │
-                  ┌──────────▼──────────┐
-                  │  Split into C₀, D₀   │  (28 bits each)
-                  └──────────┬──────────┘
-                             │
-                ┌────────────▼────────────┐
-                │   For each round i:      │
-                │                          │
-                │   Left-shift Cᵢ by       │
-                │   SHIFT[i] positions     │
-                │                          │
-                │   Left-shift Dᵢ by       │
-                │   SHIFT[i] positions     │
-                │                          │
-                │   Merge: Cᵢ₊₁ || Dᵢ₊₁   │
-                │   (56 bits)              │
-                │          │               │
-                │   Apply CP_2             │
-                │   (56 → 48 bits)         │
-                │          │               │
-                │   → Round subkey Kᵢ      │
-                └────────────┬────────────┘
-                             │
-                  16 subkeys: K₁, K₂, ..., K₁₆
-```
-
-### CBC Mode Diagram
-
-**Encryption:**
-```
-  IV ─────────┐
-              ▼
-  P₁ ──► XOR ──► DES_Encrypt ──► C₁ ──────┐
-                                            │
-              ┌─────────────────────────────┘
-              ▼
-  P₂ ──► XOR ──► DES_Encrypt ──► C₂ ──────┐
-                                            │
-              ┌─────────────────────────────┘
-              ▼
-  P₃ ──► XOR ──► DES_Encrypt ──► C₃
-  
-  Output: IV || C₁ || C₂ || C₃
-```
-
-**Decryption:**
-```
-  IV ─────────┐
-              ▼
-  C₁ ──► DES_Decrypt ──► XOR ──► P₁
-  │
-  └───────────┐
-              ▼
-  C₂ ──► DES_Decrypt ──► XOR ──► P₂
-  │
-  └───────────┐
-              ▼
-  C₃ ──► DES_Decrypt ──► XOR ──► P₃
-```
+- The receiver runs in a **daemon thread** (automatically killed when the main thread exits)
+- The main thread waits for user input in a loop
+- Typing `exit`, pressing `Ctrl+C`, or `Ctrl+D` cleanly disconnects
+- Non-empty lines are encrypted and sent
 
 ---
 
